@@ -1,8 +1,16 @@
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
 import path from 'node:path';
 import vm from 'node:vm';
+import fs from 'node:fs/promises';
 import { type RawSourceMap } from 'source-map-js';
-import { type OutputFile, build, type BuildFailure } from 'esbuild';
+import {
+  type OutputFile,
+  build,
+  type ResolveOptions,
+  type BuildFailure,
+  type Loader,
+} from 'esbuild';
+import type { renderAsync } from '@react-email/render';
 import type { EmailTemplate as EmailComponent } from './types/email-template';
 import type { ErrorObject } from './types/error-object';
 import { improveErrorWithSourceMap } from './improve-error-with-sourcemap';
@@ -14,6 +22,8 @@ export const getEmailComponent = async (
   | {
       emailComponent: EmailComponent;
 
+      renderAsync: typeof renderAsync;
+
       sourceMapToOriginalFile: RawSourceMap;
     }
   | { error: ErrorObject }
@@ -23,8 +33,49 @@ export const getEmailComponent = async (
     const buildData = await build({
       bundle: true,
       entryPoints: [emailPath],
+      plugins: [
+        {
+          name: 'add-export-for-render-async',
+          setup(b) {
+            b.onLoad(
+              { filter: new RegExp(path.basename(emailPath)) },
+              async () => ({
+                contents: `${await fs.readFile(emailPath, 'utf8')};
+                  export { renderAsync } from 'react-email-module-that-will-export-render'
+                `,
+                loader: path.extname(emailPath).slice(1) as Loader,
+              }),
+            );
+
+            b.onResolve(
+              { filter: /^react-email-module-that-will-export-render$/ },
+              async (args) => {
+                const options: ResolveOptions = {
+                  kind: 'import-statement',
+                  importer: args.importer,
+                  resolveDir: args.resolveDir,
+                  namespace: args.namespace,
+                };
+                let result = await b.resolve('@react-email/render', options);
+                if (result.errors.length === 0) {
+                  return result;
+                }
+
+                // If @react-email/render does not exist, resolve to @react-email/components
+                result = await b.resolve('@react-email/components', options);
+                if (result.errors.length > 0) {
+                  result.errors[0]!.text =
+                    "Failed trying to import `renderAsync` from either `@react-email/render` or `@react-email/components` to be able to render your email template.\n Maybe you don't have either of them installed?";
+                }
+                return result;
+              },
+            );
+          },
+        },
+      ],
       platform: 'node',
       write: false,
+
       format: 'cjs',
       jsx: 'automatic',
       logLevel: 'silent',
@@ -56,8 +107,21 @@ export const getEmailComponent = async (
     ...global,
     console,
     Buffer,
-    module: { exports: { default: undefined as unknown } },
-    __filanem: emailPath,
+    TextDecoder,
+    TextDecoderStream,
+    TextEncoder,
+    TextEncoderStream,
+    ReadableStream,
+    URL,
+    URLSearchParams,
+    Headers,
+    module: {
+      exports: {
+        default: undefined as unknown,
+        renderAsync: undefined as unknown,
+      },
+    },
+    __filename: emailPath,
     __dirname: path.dirname(emailPath),
     require: (module: string) => {
       if (module in staticNodeModulesForVM) {
@@ -65,7 +129,7 @@ export const getEmailComponent = async (
         return staticNodeModulesForVM[module];
       }
 
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-useless-template-literals
       return require(`${module}`) as unknown;
       // this stupid string templating was necessary to not have
       // webpack warnings like:
@@ -79,10 +143,17 @@ export const getEmailComponent = async (
     process,
   };
   const sourceMapToEmail = JSON.parse(sourceMapFile.text) as RawSourceMap;
+  // because it will have a path like <tsconfigLocation>/stdout/email.js.map
+  sourceMapToEmail.sourceRoot = path.resolve(sourceMapFile.path, '../..');
+  sourceMapToEmail.sources = sourceMapToEmail.sources.map((source) =>
+    path.resolve(sourceMapFile.path, '..', source),
+  );
   try {
     vm.runInNewContext(builtEmailCode, fakeContext, { filename: emailPath });
   } catch (exception) {
     const error = exception as Error;
+
+    error.stack &&= error.stack.split('at Script.runInContext (node:vm')[0];
 
     return {
       error: improveErrorWithSourceMap(error, emailPath, sourceMapToEmail),
@@ -103,6 +174,8 @@ export const getEmailComponent = async (
 
   return {
     emailComponent: fakeContext.module.exports.default as EmailComponent,
+    renderAsync: fakeContext.module.exports.renderAsync as typeof renderAsync,
+
     sourceMapToOriginalFile: sourceMapToEmail,
   };
 };

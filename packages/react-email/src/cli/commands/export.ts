@@ -37,6 +37,11 @@ export const exportTemplates = async (
   emailsDirectoryPath: string,
   options: Options,
 ) => {
+  /* Delete the out directory if it already exists */
+  if (fs.existsSync(pathToWhereEmailMarkupShouldBeDumped)) {
+    fs.rmSync(pathToWhereEmailMarkupShouldBeDumped, { recursive: true });
+  }
+
   const spinner = ora('Preparing files...\n').start();
   closeOraOnSIGNIT(spinner);
 
@@ -59,6 +64,8 @@ export const exportTemplates = async (
     entryPoints: allTemplates,
     platform: 'node',
     format: 'cjs',
+    loader: { '.js': 'jsx' },
+    outExtension: { '.js': '.cjs' },
     jsx: 'transform',
     write: true,
     outdir: pathToWhereEmailMarkupShouldBeDumped,
@@ -81,7 +88,7 @@ export const exportTemplates = async (
   spinner.succeed();
 
   const allBuiltTemplates = glob.sync(
-    normalize(`${pathToWhereEmailMarkupShouldBeDumped}/*.js`),
+    normalize(`${pathToWhereEmailMarkupShouldBeDumped}/**/*.cjs`),
     {
       absolute: true,
     },
@@ -95,7 +102,7 @@ export const exportTemplates = async (
       const component = require(template);
       const rendered = render(component.default({}), options);
       const htmlPath = template.replace(
-        '.js',
+        '.cjs',
         options.plainText ? '.txt' : '.html',
       );
       writeFileSync(htmlPath, rendered);
